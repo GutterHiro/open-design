@@ -1,0 +1,43 @@
+name: Publish Coolify Image (open-design-claude)
+
+# Builds the open-design base image, layers the Claude Code CLI on top, and
+# publishes the result to GHCR so Coolify (design.iamthalles.com) can pull it
+# instead of building locally on the VPS.
+#
+# Update flow:
+#   git fetch upstream && git checkout deploy
+#   git rebase <new open-design-vX.Y.Z tag>   # keep the Dockerfile patch + this workflow
+#   git push fork deploy                        # -> this workflow builds & pushes
+
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build base image (open-design:latest)
+        run: docker build -f deploy/Dockerfile -t open-design:latest .
+
+      - name: Build Claude layer and push
+        run: |
+          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/open-design:latest"
+          docker build -f deploy/Dockerfile.claude -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "Published $IMAGE"

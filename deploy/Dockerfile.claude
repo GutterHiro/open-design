@@ -1,0 +1,17 @@
+# Custom layer for the Coolify deploy (design.iamthalles.com).
+# Adds the Claude Code CLI on top of the base `open-design:latest` image.
+# In CI the base is built first from deploy/Dockerfile, then this layer is built
+# and pushed to GHCR. See .github/workflows/publish-coolify-image.yml.
+FROM open-design:latest
+
+USER root
+
+# Install the Claude Code CLI (multiarch, works on Alpine)
+RUN npm install -g @anthropic-ai/claude-code --omit=optional --omit=dev && \
+    npm cache clean --force
+
+# Ensure the app user can write to its HOME (.claude bind mount at runtime)
+RUN mkdir -p /home/open-design/.claude && \
+    chown -R open-design:open-design /home/open-design
+
+USER open-design
