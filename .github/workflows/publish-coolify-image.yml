@@ -1,29 +1,51 @@
 name: Publish Coolify Image (open-design-claude)
 
-# Builds the open-design base image, layers the Claude Code CLI on top, and
-# publishes the result to GHCR so Coolify (design.iamthalles.com) can pull it
-# instead of building locally on the VPS.
+# Tracks the latest OFFICIAL open-design release (nexu-io/open-design), builds it,
+# layers the Claude Code CLI on top, and publishes to GHCR for Coolify
+# (design.iamthalles.com). Runs daily so the image stays current automatically.
 #
-# Update flow:
-#   git fetch upstream && git checkout deploy
-#   git rebase <new open-design-vX.Y.Z tag>   # keep the Dockerfile patch + this workflow
-#   git push fork deploy                        # -> this workflow builds & pushes
+# Customizations live ONLY on this branch as ADDITIVE files (this workflow +
+# deploy/Dockerfile.claude). The upstream source is fetched fresh at build time,
+# so there is NEVER a rebase/merge conflict when upstream advances.
+#
+# NOTE: auto-build is safe. Deploying a new version migrates the SQLite data in
+# /app/.od one-way, so the Coolify deploy stays MANUAL — back up the volume first.
 
 on:
+  schedule:
+    - cron: '0 6 * * *'   # daily 06:00 UTC — picks up new upstream releases
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if this version is already published'
+        type: boolean
+        default: false
   push:
     branches: [deploy]
-  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
+env:
+  UPSTREAM: https://github.com/nexu-io/open-design.git
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout build harness (deploy branch)
         uses: actions/checkout@v4
+
+      - name: Resolve latest upstream release tag
+        id: rel
+        run: |
+          TAG=$(git ls-remote --tags --refs "$UPSTREAM" 'open-design-v*' \
+                | awk -F/ '{print $NF}' | sort -V | tail -1)
+          [ -n "$TAG" ] || { echo "No upstream release tag found"; exit 1; }
+          echo "tag=$TAG"             >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#open-design-v}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $TAG"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -32,12 +54,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build base image (open-design:latest)
-        run: docker build -f deploy/Dockerfile -t open-design:latest .
-
-      - name: Build Claude layer and push
+      - name: Decide whether to build
+        id: gate
         run: |
-          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/open-design:latest"
-          docker build -f deploy/Dockerfile.claude -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "Published $IMAGE"
+          OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if docker manifest inspect "ghcr.io/$OWNER/open-design:${{ steps.rel.outputs.version }}" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Version ${{ steps.rel.outputs.version }} already published — nothing to do."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch upstream source at release tag
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          git clone --depth 1 --branch "${{ steps.rel.outputs.tag }}" "$UPSTREAM" src
+          cp deploy/Dockerfile.claude src/deploy/Dockerfile.claude
+
+      - name: Build base + Claude layer and push
+        if: steps.gate.outputs.build == 'true'
+        working-directory: src
+        run: |
+          OWNER=${{ steps.gate.outputs.owner }}
+          VER=${{ steps.rel.outputs.version }}
+          docker build -f deploy/Dockerfile -t open-design:latest .
+          docker build -f deploy/Dockerfile.claude \
+            -t "ghcr.io/$OWNER/open-design:latest" \
+            -t "ghcr.io/$OWNER/open-design:$VER" .
+          docker push "ghcr.io/$OWNER/open-design:latest"
+          docker push "ghcr.io/$OWNER/open-design:$VER"
+          echo "Published ghcr.io/$OWNER/open-design:$VER (and :latest)"
