@@ -1,0 +1,38 @@
+name: Trigger Coolify image build
+
+# Thin trigger only — lives on `main` because GitHub only evaluates the
+# `schedule` trigger (and only runs scheduled workflows at all) using the
+# copy of the workflow file on the repository's DEFAULT branch. The real
+# build logic stays isolated on `deploy` (publish-coolify-image.yml) as an
+# ADDITIVE file, so syncing this fork with upstream nexu-io/open-design
+# never causes a merge conflict with the harness.
+#
+# This file just asks the deploy-branch workflow to run. Its own gate step
+# no-ops if the current upstream release is already published on GHCR, so
+# firing it on every sync/push here is cheap. Note the build workflow reads
+# the latest release straight from nexu-io via git ls-remote — it never
+# reads this fork's content — so the daily schedule alone keeps GHCR current
+# even without a fork sync. The push trigger below just makes a sync produce
+# an immediate build instead of waiting for the next scheduled run.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '15 6 * * *'   # daily fallback in case a sync is missed
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask deploy branch to check/build the latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run publish-coolify-image.yml \
+            --repo ${{ github.repository }} \
+            --ref deploy
