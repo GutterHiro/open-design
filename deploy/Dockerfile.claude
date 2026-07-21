@@ -5,6 +5,7 @@
 FROM open-design:latest
 
 USER root
+ENV CODEX_HOME=/app/.od/codex
 
 # Install the Claude Code CLI (multiarch, works on Alpine)
 RUN npm install -g @anthropic-ai/claude-code --omit=optional --omit=dev && \
