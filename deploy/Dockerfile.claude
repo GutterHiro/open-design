@@ -8,6 +8,7 @@ USER root
 
 # Install the Claude Code CLI (multiarch, works on Alpine)
 RUN npm install -g @anthropic-ai/claude-code --omit=optional --omit=dev && \
+    npm install -g @openai/codex --omit=optional --omit=dev && \
     npm cache clean --force
 
 # Ensure the app user can write to its HOME (.claude bind mount at runtime)
