@@ -34,6 +34,12 @@ const CRITICAL_SCENARIO_IDS = new Set([
   'file-upload-send',
   'conversation-delete-recovery',
 ]);
+const MERGE_EXTRA_SCENARIO_IDS = new Set([
+  'prototype-basic',
+  'deck-basic',
+  'file-mention',
+  'deep-link-preview',
+]);
 test.describe.configure({ timeout: 45_000 });
 
 function artifactPreview(page: Page) {
@@ -94,7 +100,7 @@ test.beforeEach(async ({ page }) => {
 for (const entry of automatedUiScenarios().filter(
   (scenario) => !APP_OWNED_SCENARIO_FLOWS.has(scenario.flow ?? ''),
 )) {
-  test(`[${scenarioPriority(entry)}]${criticalScenarioTag(entry)} ${entry.id}: ${entry.title}`, async ({ page }) => {
+  test(`[${scenarioPriority(entry)}]${criticalScenarioTag(entry)}${mergeExtraScenarioTag(entry)} ${entry.id}: ${entry.title}`, async ({ page }) => {
     await routeMockAgents(page);
 
     if (entry.flow === 'example-use-prompt') {
@@ -394,54 +400,7 @@ for (const entry of automatedUiScenarios().filter(
   });
 }
 
-test('[P0] @critical comment attachment flow attaches preview comments to the next run as structured context', async ({ page }) => {
-  test.setTimeout(75_000);
-  const entry = automatedUiScenarios().find((scenario) => scenario.id === 'comment-attachment-flow');
-  if (!entry?.mockArtifact) {
-    throw new Error('comment-attachment-flow scenario fixture is missing');
-  }
-
-  await routeMockAgents(page);
-  await page.route('**/api/runs', async (route) => {
-    await route.fulfill({
-      status: 202,
-      contentType: 'application/json',
-      body: JSON.stringify({ runId: 'comment-attachment-run' }),
-    });
-  });
-  await page.route('**/api/runs/*/events', async (route) => {
-    const body = [
-      'event: start',
-      'data: {"bin":"mock-agent"}',
-      '',
-      'event: end',
-      'data: {"code":0,"status":"succeeded"}',
-      '',
-      '',
-    ].join('\n');
-    await route.fulfill({
-      status: 200,
-      headers: {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-      },
-      body,
-    });
-  });
-
-  const projectId = await createEmptyProject(page, 'Comment attachment flow');
-  await expectWorkspaceReady(page);
-  await seedHtmlArtifact(page, projectId, entry.mockArtifact.fileName, entry.mockArtifact.html);
-  await page.reload();
-  await expectWorkspaceReady(page);
-  await page.goto(`/projects/${projectId}/files/${entry.mockArtifact.fileName}`, { waitUntil: 'domcontentloaded' });
-  await waitForLoadingToClear(page);
-  await expect(artifactPreview(page)).toBeVisible();
-
-  await runCommentAttachmentFlow(page, entry);
-});
-
-test('[P0] sending preview comments opens the refreshed follow-up artifact', async ({ page }) => {
+test('[P0] @critical sending preview comments attaches structured context and opens the refreshed artifact', async ({ page }) => {
   test.setTimeout(75_000);
   const entry = automatedUiScenarios().find((scenario) => scenario.id === 'comment-attachment-flow');
   if (!entry?.mockArtifact) {
@@ -507,12 +466,13 @@ test('[P0] sending preview comments opens the refreshed follow-up artifact', asy
 
   await page.getByTestId('board-mode-toggle').click();
   await page.getByTestId('comment-panel-toggle').click();
-  const frame = artifactPreviewFrame(page);
-  await frame.locator('[data-od-id="hero-title"]').click();
+  await clickCommentTargetInPreview(page, '[data-od-id="hero-title"]');
   await expect(page.getByTestId('comment-popover')).toBeVisible();
   await page.getByTestId('comment-popover-input').fill('Make the headline more specific.');
   await page.getByTestId('comment-popover-save').click();
   await expect(page.getByTestId('comment-saved-marker-hero-title')).toBeVisible();
+  await expect(page.getByTestId('staged-comment-attachments')).toHaveCount(0);
+  await expect(page.getByTestId('comment-popover')).toHaveCount(0);
 
   const sidePanel = page.getByTestId('comment-side-panel');
   await expect(sidePanel).toBeVisible();
@@ -542,6 +502,7 @@ test('[P0] sending preview comments opens the refreshed follow-up artifact', asy
       filePath?: string;
     }>;
   };
+  expect(body.message ?? '').not.toContain('Apply selected preview comments');
   expect(body.message).toContain('Make the headline more specific.');
   expect(body.commentAttachments).toEqual([
     expect.objectContaining({
@@ -608,6 +569,10 @@ function scenarioPriority(entry: UiScenario): 'P0' | 'P1' | 'P2' {
 
 function criticalScenarioTag(entry: UiScenario): string {
   return CRITICAL_SCENARIO_IDS.has(entry.id) ? ' @critical' : '';
+}
+
+function mergeExtraScenarioTag(entry: UiScenario): string {
+  return MERGE_EXTRA_SCENARIO_IDS.has(entry.id) ? ' @merge-extra' : '';
 }
 
 async function routeMockSuccessfulRun(page: Page, runId: string) {
@@ -1032,6 +997,8 @@ async function runQuestionFormSubmitPersistenceFlow(
   const firstRunBody = (await firstRunRequestPromise).postDataJSON() as Record<string, unknown>;
   expectScenarioRunRequest(firstRunBody, entry);
 
+  // Studio discovery renders the clarification form inline in the chat flow
+  // (the legacy Questions workspace tab is gone), so locate the form directly.
   const form = page.locator('.question-form').first();
   await expect(form).toBeVisible();
 
@@ -1046,7 +1013,9 @@ async function runQuestionFormSubmitPersistenceFlow(
   await expect(summary).toBeVisible();
   await expect(summary.getByText('Questions answered')).toBeVisible();
   await expect(summary.getByText('Visual tone')).toBeVisible();
-  await expect(summary.getByText('Modern minimal')).toBeVisible();
+  // The summary echoes the picked visual-style card (its title), not the
+  // underlying option label.
+  await expect(summary.getByText('Quiet SaaS')).toBeVisible();
 
   const { projectId, conversationId } = await getCurrentProjectContext(page);
   const messagesResponse = await page.request.get(
@@ -1056,13 +1025,17 @@ async function runQuestionFormSubmitPersistenceFlow(
   const { messages } = (await messagesResponse.json()) as { messages: Array<{ role: string; content: string }> };
   const formAnswerMessage = messages.find((message) => message.role === 'user' && message.content.includes('[form answers — discovery]'));
   expect(formAnswerMessage).toBeTruthy();
+  // Inline discovery submits the picked visual-style card and its value id,
+  // not the raw option labels.
+  expect(formAnswerMessage?.content).toContain('Visual tone: Quiet SaaS');
+  expect(formAnswerMessage?.content).toContain('[value: prototype-quiet-saas]');
 
   await page.reload();
   await expectWorkspaceReady(page);
   const restoredSummary = page.getByTestId('question-form-summary');
   await expect(restoredSummary).toBeVisible();
   await expect(restoredSummary.getByText('Visual tone')).toBeVisible();
-  await expect(restoredSummary.getByText('Modern minimal')).toBeVisible();
+  await expect(restoredSummary.getByText('Quiet SaaS')).toBeVisible();
   await expect(page.locator('.question-form')).toHaveCount(0);
 }
 
@@ -1086,14 +1059,22 @@ async function runGenerationDoesNotCreateExtraFileFlow(
   await expectScenarioProjectState(page, entry, projectId);
 }
 
+async function clickCommentTargetInPreview(page: Page, selector: string) {
+  const target = artifactPreviewFrame(page).locator(selector);
+  await expect(target).toBeVisible();
+  // Auto-fit zoom + comment-bridge injection can keep the iframe target
+  // moving for long enough that Playwright's stability check never settles
+  // (CI: "element is not stable" until test timeout). Force once visible.
+  await target.click({ force: true });
+}
+
 async function runCommentAttachmentFlow(
   page: Page,
   entry: UiScenario,
 ) {
   await page.getByTestId('board-mode-toggle').click();
   await page.getByTestId('comment-panel-toggle').click();
-  const frame = artifactPreviewFrame(page);
-  await frame.locator('[data-od-id="hero-title"]').click();
+  await clickCommentTargetInPreview(page, '[data-od-id="hero-title"]');
   await expect(page.getByTestId('comment-popover')).toBeVisible();
   await page.getByTestId('comment-popover-input').fill('Make the headline more specific.');
   await page.getByTestId('comment-popover-save').click();
